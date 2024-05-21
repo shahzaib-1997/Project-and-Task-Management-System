@@ -5,7 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.conf import settings
 from django.db.utils import IntegrityError
@@ -13,6 +13,10 @@ import jwt
 from .models import Project, Task
 from .serializers import ProjectSerializer, TaskSerializer, UserSerializer
 from .permissions import CRUDPermission
+
+
+def home(request):
+    return render(request, "home.html")
 
 
 class UserViewSet(viewsets.ViewSet):
