@@ -3,6 +3,7 @@ from rest_framework import views, viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from django.shortcuts import get_object_or_404, render
@@ -10,9 +11,21 @@ from django.utils import timezone
 from django.conf import settings
 from django.db.utils import IntegrityError
 import jwt
-from .models import Project, Task
-from .serializers import ProjectSerializer, TaskSerializer, UserSerializer
-from .permissions import CRUDPermission
+from .models import Project, Task, ProjectMember
+from .serializers import (
+    ProjectSerializer,
+    TaskSerializer,
+    UserSerializer,
+    ProjectMemberSerializer,
+)
+from .authentication import UserAuthentication
+from .permissions import (
+    CanAddMembers,
+    CanCreateTask,
+    CanDeleteTask,
+    CanUpdateTask,
+    IsProjectMember,
+)
 
 
 def home(request):
@@ -53,8 +66,8 @@ class UserViewSet(viewsets.ViewSet):
                 raise AuthenticationFailed("Invalid credentials")
             payload = {
                 "id": user.id,
-                "exp": timezone.now() + timedelta(hours=24),
-                "iat": timezone.now(),
+                "exp": (timezone.now() + timedelta(hours=24)).timestamp(),
+                "iat": timezone.now().timestamp(),
             }
             token = jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
             return Response({"msg": "Login successfully!", "token": token})
@@ -65,13 +78,12 @@ class UserViewSet(viewsets.ViewSet):
 
 
 class ProjectAPIView(views.APIView):
-    permission_classes = [CRUDPermission]
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [UserAuthentication]
 
     def get(self, request):
         try:
-            projects = Project.objects.filter(
-                deleted=False, owner=request.GET["user_id"]
-            )
+            projects = Project.objects.filter(deleted=False, owner=request.user)
             serializer = ProjectSerializer(projects, many=True)
             return Response(
                 {"data": serializer.data},
@@ -85,7 +97,7 @@ class ProjectAPIView(views.APIView):
     def post(self, request):
         try:
             data = request.data
-            data["owner"] = request.GET["user_id"]
+            data["owner"] = request.user.id
             serializer = ProjectSerializer(data=data)
             if serializer.is_valid():
                 serializer.save()
@@ -105,6 +117,11 @@ class ProjectAPIView(views.APIView):
         try:
             if pk:
                 project = get_object_or_404(Project, id=pk)
+                if project.owner != request.user:
+                    return Response(
+                        {"error": "Only owner can update the project."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 data = request.data
                 serializer = ProjectSerializer(project, data=data, partial=True)
                 if serializer.is_valid():
@@ -132,6 +149,11 @@ class ProjectAPIView(views.APIView):
         try:
             if pk:
                 project = get_object_or_404(Project, id=pk)
+                if project.owner != request.user:
+                    return Response(
+                        {"error": "Only owner can delete the project."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 if not project.deleted:
                     project.deleted = True
                     project.save()
@@ -150,102 +172,166 @@ class ProjectAPIView(views.APIView):
             )
 
 
-class TaskAPIView(views.APIView):
-    permission_classes = [CRUDPermission]
+class ProjectMemberAPIView(views.APIView):
+    authentication_classes = [UserAuthentication]
+    permission_classes = [IsAuthenticated, CanAddMembers]
 
-    def get(self, request):
+    def get(self, request, project_id):
         try:
-            project_id = request.GET.get("project_id", None)
-            if project_id:
-                tasks = Task.objects.filter(deleted=False, project=project_id)
-                if tasks:
-                    serializer = TaskSerializer(tasks, many=True)
-                    return Response(
-                        {"data": serializer.data},
-                        status=status.HTTP_200_OK,
-                    )
+            project_members = ProjectMember.objects.filter(
+                deleted=False, project=project_id
+            )
+            serializer = ProjectMemberSerializer(project_members, many=True)
+            return Response(
+                {"data": serializer.data},
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def post(self, request, project_id):
+        try:
+            project = get_object_or_404(Project, id=project_id)
+            data = request.data
+            data["project"] = project.id
+            serializer = ProjectMemberSerializer(data=data)
+            if serializer.is_valid():
+                serializer.save()
                 return Response(
-                    {"msg": "Tasks not created yet against given project id."},
+                    {"msg": "Member added successfully", "data": serializer.data},
+                    status=status.HTTP_201_CREATED,
+                )
+            return Response(
+                {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def put(self, request, project_id, user_id):
+        try:
+            project_member = get_object_or_404(
+                ProjectMember, project_id=project_id, user_id=user_id
+            )
+            data = request.data
+            serializer = ProjectMemberSerializer(
+                project_member, data=data, partial=True
+            )
+            if serializer.is_valid():
+                serializer.save()
+                return Response(
+                    {
+                        "msg": "Permissions updated successfully",
+                        "data": serializer.data,
+                    },
                     status=status.HTTP_200_OK,
                 )
             return Response(
-                {"error": "Please provide project id to get task of that project."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    def post(self, request):
+    def delete(self, request, project_id, user_id):
         try:
-            project_id = request.GET.get("project_id", None)
-            if project_id:
-                user = request.GET["user_id"]
-                project = get_object_or_404(Project, id=project_id)
-                serializer = ProjectSerializer(project)
-                if (
-                    user in serializer.data["members"]
-                    or user == serializer.data["owner"]
-                ):
-                    data = request.data
-                    data["project"] = project_id
-                    serializer = TaskSerializer(data=data)
-                    if serializer.is_valid():
-                        serializer.save()
-                        return Response(
-                            {
-                                "msg": "Task created successfully",
-                                "data": serializer.data,
-                            },
-                            status=status.HTTP_201_CREATED,
-                        )
-                    return Response(
-                        {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
-                    )
+            project_member = get_object_or_404(
+                ProjectMember, project_id=project_id, user_id=user_id
+            )
+            if request.user == project_member.project.owner:
+                if not project_member.deleted:
+                    project_member.deleted = True
+                    project_member.save()
+                    return Response(status=status.HTTP_204_NO_CONTENT)
                 return Response(
-                    {"error": "You are not member or owner of this project!"},
+                    {"msg": "Project Member already deleted."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             return Response(
-                {"error": "Please provide project id to create task in that project."},
+                {"error": "Only project owner can delete members!"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
         except Exception as e:
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    def put(self, request, pk=None):
+
+class TaskAPIView(views.APIView):
+    authentication_classes = [UserAuthentication]
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [permission() for permission in [IsAuthenticated, CanCreateTask]]
+        elif self.request.method in ["PUT", "PATCH"]:
+            return [permission() for permission in [IsAuthenticated, CanUpdateTask]]
+        elif self.request.method == "DELETE":
+            return [permission() for permission in [IsAuthenticated, CanDeleteTask]]
+        return [permission() for permission in [IsAuthenticated, IsProjectMember]]
+
+    def get(self, request, project_id):
+        try:
+            tasks = Task.objects.filter(deleted=False, project=project_id)
+            if tasks:
+                serializer = TaskSerializer(tasks, many=True)
+                return Response(
+                    {"data": serializer.data},
+                    status=status.HTTP_200_OK,
+                )
+            return Response(
+                {"msg": "No tasks created yet against given project id."},
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def post(self, request, project_id):
+        try:
+            user = request.user
+            data = request.data
+            data["project"] = project_id
+            data["created_by"] = user.id
+            serializer = TaskSerializer(data=data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(
+                    {
+                        "msg": "Task created successfully",
+                        "data": serializer.data,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            return Response(
+                {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def put(self, request, project_id, pk=None):
         try:
             if pk:
                 task = get_object_or_404(Task, id=pk)
-                project_id = task.project.id
-                user = request.GET["user_id"]
-                project = get_object_or_404(Project, id=project_id)
-                serializer = ProjectSerializer(project)
-                if (
-                    user in serializer.data["members"]
-                    or user == serializer.data["owner"]
-                ):
-                    data = request.data
-                    serializer = TaskSerializer(task, data=data, partial=True)
-                    if serializer.is_valid():
-                        serializer.save()
-                        return Response(
-                            {
-                                "msg": "Task updated successfully",
-                                "data": serializer.data,
-                            },
-                            status=status.HTTP_200_OK,
-                        )
+                data = request.data
+                serializer = TaskSerializer(task, data=data, partial=True)
+                if serializer.is_valid():
+                    serializer.save()
                     return Response(
-                        {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
+                        {
+                            "msg": "Task updated successfully",
+                            "data": serializer.data,
+                        },
+                        status=status.HTTP_200_OK,
                     )
                 return Response(
-                    {"error": "You are not member or owner of this project!"},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {"error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST
                 )
             return Response(
                 {"error": "Task id not provided in url."},
@@ -256,7 +342,7 @@ class TaskAPIView(views.APIView):
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    def delete(self, request, pk=None):
+    def delete(self, request, project_id, pk=None):
         try:
             if pk:
                 task = get_object_or_404(Task, id=pk)

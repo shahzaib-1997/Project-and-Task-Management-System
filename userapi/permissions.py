@@ -1,28 +1,71 @@
-import jwt
 from rest_framework import permissions
-from rest_framework.exceptions import APIException
-from rest_framework.exceptions import AuthenticationFailed
-from django.conf import settings
+from .models import ProjectMember, Project
 
 
-class UnauthorizedException(APIException):
-    status_code = 401
-    default_detail = {"detail": "Token Not provided!"}
-    default_code = "not_authenticated"
-
-
-class CRUDPermission(permissions.BasePermission):
+class IsProjectMember(permissions.BasePermission):
     def has_permission(self, request, view):
-        auth_header = request.headers.get("Authorization")
-        if not auth_header:
-            raise UnauthorizedException()
-        try:
-            token = auth_header.split(" ")[1]
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            request.GET._mutable = True
-            request.GET['user_id'] = payload['id']
+        user = request.user
+        project_id = view.kwargs.get("project_id")
+        if not project_id:
+            return False
+
+        project = Project.objects.filter(id=project_id).first()
+        if project and project.owner == user:
             return True
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed("Token has expired")
-        except jwt.InvalidTokenError:
-            raise AuthenticationFailed("Invalid token")
+        return ProjectMember.objects.filter(user=user, project_id=project_id).exists()
+
+
+class CanCreateTask(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        project_id = view.kwargs.get("project_id")
+        if not project_id:
+            return False
+
+        project = Project.objects.filter(id=project_id).first()
+        if project and project.owner == user:
+            return True
+        member = ProjectMember.objects.filter(user=user, project_id=project_id).first()
+        return member and member.can_create
+
+
+class CanUpdateTask(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        project_id = view.kwargs.get("project_id")
+        if not project_id:
+            return False
+        print(user)
+        project = Project.objects.filter(id=project_id).first()
+        if project and project.owner == user:
+            return True
+        member = ProjectMember.objects.filter(user=user, project_id=project_id).first()
+        return member and member.can_update
+
+
+class CanDeleteTask(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        project_id = view.kwargs.get("project_id")
+        if not project_id:
+            return False
+
+        project = Project.objects.filter(id=project_id).first()
+        if project and project.owner == user:
+            return True
+        member = ProjectMember.objects.filter(user=user, project_id=project_id).first()
+        return member and member.can_delete
+
+
+class CanAddMembers(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        project_id = view.kwargs.get("project_id")
+        if not project_id:
+            return False
+
+        project = Project.objects.filter(id=project_id).first()
+        if project and project.owner == user:
+            return True
+        member = ProjectMember.objects.filter(user=user, project_id=project_id).first()
+        return member and member.add_members

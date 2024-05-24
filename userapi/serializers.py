@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Project, Task
+from .models import Project, Task, ProjectMember
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -13,7 +13,13 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Project
-        fields = ["id", "name", "description", "owner", "members"]
+        fields = ["id", "name", "description", "owner"]
+
+
+class ProjectMemberSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectMember
+        exclude = ["deleted"]
 
 
 class TaskSerializer(serializers.ModelSerializer):
@@ -27,4 +33,5 @@ class TaskSerializer(serializers.ModelSerializer):
             "status",
             "due_date",
             "project",
+            "created_by",
         ]
